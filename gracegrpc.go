@@ -26,6 +26,7 @@ type GraceGrpc struct {
 	listener net.Listener
 	errors   chan error
 	pidfile  string
+	OnClose  func()
 }
 
 func New(s *grpc.Server, net, addr, pidFile string) (*GraceGrpc, error) {
@@ -46,7 +47,11 @@ func New(s *grpc.Server, net, addr, pidFile string) (*GraceGrpc, error) {
 }
 
 func (gr *GraceGrpc) serve() {
-	go gr.server.Serve(gr.listener)
+	go func() {
+		if err := gr.server.Serve(gr.listener); err != nil {
+			log.Println(err.Error())
+		}
+	}()
 }
 
 func (gr *GraceGrpc) wait() {
@@ -68,6 +73,7 @@ func (gr *GraceGrpc) signalHandler(wg *sync.WaitGroup) {
 			gr.server.GracefulStop()
 			return
 		case syscall.SIGUSR2:
+			gr.OnClose()
 			if _, err := gr.net.StartProcess(); err != nil {
 				gr.errors <- err
 			}
@@ -77,8 +83,7 @@ func (gr *GraceGrpc) signalHandler(wg *sync.WaitGroup) {
 
 func (gr *GraceGrpc) doWritePid(pid int) error {
 	if gr.pidfile == "" {
-		log.Println("No pid file path")
-		return nil
+		return fmt.Errorf("No pid file path")
 	}
 
 	pf, err := os.Create(gr.pidfile)
