@@ -2,7 +2,6 @@ package gracegrpc
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -17,13 +16,11 @@ import (
 )
 
 var (
-	verbose    = flag.Bool("gracelog", true, "Enable logging.")
-	gracePid   = os.Getenv("GRACE_PID_FILE")
 	didInherit = os.Getenv("LISTEN_FDS") != ""
 	ppid       = os.Getppid()
 )
 
-type graceGrpc struct {
+type GraceGrpc struct {
 	server   *grpc.Server
 	net      *gracenet.Net
 	listener net.Listener
@@ -31,44 +28,39 @@ type graceGrpc struct {
 	pidfile  string
 }
 
-func (gr *graceGrpc) InitPidFile(pid_file string) {
-	gr.pidfile = pid_file
-}
-
-func NewGraceGrpc(s *grpc.Server, net, addr string) *graceGrpc {
-	gr := &graceGrpc{
+func New(s *grpc.Server, net, addr, pidFile string) (*GraceGrpc, error) {
+	gr := &GraceGrpc{
 		server: s,
 		net:    &gracenet.Net{},
 
 		//for  StartProcess error.
 		errors:  make(chan error),
-		pidfile: gracePid,
+		pidfile: pidFile,
 	}
 	l, err := gr.net.Listen(net, addr)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	gr.listener = l
-	return gr
+	return gr, nil
 }
 
-func (gr *graceGrpc) serve() {
+func (gr *GraceGrpc) serve() {
 	go gr.server.Serve(gr.listener)
 }
 
-func (gr *graceGrpc) wait() {
+func (gr *GraceGrpc) wait() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go gr.signalHandler(&wg)
 	wg.Wait()
 }
 
-func (gr *graceGrpc) signalHandler(wg *sync.WaitGroup) {
+func (gr *GraceGrpc) signalHandler(wg *sync.WaitGroup) {
 	ch := make(chan os.Signal, 10)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR2)
 	for {
 		sig := <-ch
-		log.Printf("signal: %s has received", sig)
 		switch sig {
 		case syscall.SIGINT, syscall.SIGTERM:
 			defer wg.Done()
@@ -83,43 +75,42 @@ func (gr *graceGrpc) signalHandler(wg *sync.WaitGroup) {
 	}
 }
 
-func (gr *graceGrpc) doWritePid(pid int) (err error) {
+func (gr *GraceGrpc) doWritePid(pid int) error {
 	if gr.pidfile == "" {
+		log.Println("No pid file path")
 		return nil
 	}
 
 	pf, err := os.Create(gr.pidfile)
 	defer pf.Close()
 	if err != nil {
-		log.Println(err)
+		return err
 	}
 
 	_, err = pf.WriteString(strconv.Itoa(pid))
 	if err != nil {
-		log.Println(err)
+		return err
 	}
 	return err
 }
 
-func (gr *graceGrpc) Serve() error {
+func (gr *GraceGrpc) Serve() error {
 
-	if *verbose {
-		if didInherit {
-			if ppid == 1 {
-				log.Printf("Listening on init activated %s\n", pprintAddr(gr.listener))
-			} else {
-				const msg = "Graceful handoff of %s with new pid %d replace old pid %d"
-				log.Printf(msg, pprintAddr(gr.listener), os.Getpid(), ppid)
-			}
+	if didInherit {
+		if ppid == 1 {
+			log.Printf("Listening on init activated %s\n", pprintAddr(gr.listener))
 		} else {
-			const msg = "Serving %s with pid %d\n"
-			log.Printf(msg, pprintAddr(gr.listener), os.Getpid())
+			const msg = "Graceful handoff of %s with new pid %d replace old pid %d"
+			log.Printf(msg, pprintAddr(gr.listener), os.Getpid(), ppid)
 		}
+	} else {
+		const msg = "Serving %s with pid %d\n"
+		log.Printf(msg, pprintAddr(gr.listener), os.Getpid())
 	}
 
 	err := gr.doWritePid(os.Getpid())
 	if err != nil {
-		log.Println(err)
+		return err
 	}
 
 	gr.serve()
@@ -138,14 +129,10 @@ func (gr *graceGrpc) Serve() error {
 
 	select {
 	case err := <-gr.errors:
-		if err == nil {
-			panic("unexpected nil error")
-		}
 		return err
 	case <-waitdone:
-		if *verbose {
-			log.Printf("Exiting pid %d.", os.Getpid())
-		}
+
+		log.Printf("Exiting pid %d.", os.Getpid())
 		return nil
 	}
 }
